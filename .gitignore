@@ -1,0 +1,14 @@
+# WhatsApp Bot
+.wwebjs_auth/
+.wwebjs_cache/
+
+# Node.js
+node_modules/
+package-lock.json
+
+# Environment
+.env
+*.log
+
+# Session data
+session/
