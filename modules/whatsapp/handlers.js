@@ -15,17 +15,32 @@ async function handleMessage(client, msg) {
   const senderNumber = msg.from.replace('@c.us', '');
   const messageBody = msg.body.trim();
 
-  // Jika pengguna mengirim /request
-  if (messageBody === COMMANDS.REQUEST) {
-    // Mulai alur baru dengan format baris
-    userStates[senderNumber] = { step: 'waitingForCompleteData' };
-    await msg.reply(
-      'Silahkan masukkan keterangan barang yang ingin diajukan dengan format:\n\n' +
-      'Nama Lengkap:\nNama Barang:\nJumlah:\nLink:\nAlasan:\n\n' +
-      'Contoh:\nNama Lengkap: John Doe\nNama Barang: Proyektor\nJumlah: 1 unit\nLink: https://tokopedia.com/link-proyektor\nAlasan: Untuk presentasi di ruang rapat'
-    );
-    return;
-  }
+// Jika pengguna mengirim /request
+if (messageBody === COMMANDS.REQUEST) {
+  // Mulai alur baru dengan format baris
+  userStates[senderNumber] = { step: 'waitingForCompleteData' };
+  
+  // Bubble chat pertama (contoh)
+  await msg.reply(
+    'Contoh request:\n' +
+    'Nama Lengkap: John Doe\n' +
+    'Nama Barang: Proyektor\n' +
+    'Jumlah: 1 unit\n' +
+    'Link: https://tokopedia.com/link-proyektor\n' +
+    'Alasan: Untuk presentasi di ruang rapat\n\n' +
+    'Silahkan masukkan keterangan barang yang ingin diajukan dengan format seperti diatas dengan menyalin pesan dibawah:'
+  );
+  
+  // Bubble chat kedua (template kosong)
+  await msg.reply(
+    'Nama Lengkap:\n' +
+    'Nama Barang:\n' +
+    'Jumlah:\n' +
+    'Link:\n' +
+    'Alasan:'
+  );
+  return;
+}
 
   // Jika pengguna sedang dalam alur pembuatan request
   if (userStates[senderNumber] && userStates[senderNumber].step === 'waitingForCompleteData') {
@@ -74,7 +89,7 @@ async function handleMessage(client, msg) {
       quantity: requestData.quantity,
       link: requestData.link,
       reason: requestData.reason,
-      status: 'PENDING_APPROVAL_1',
+      status: 'PENDING_APPROVAL',
       approvalKadep: null,
       statusBendahara: null,
       reasonKadep: null,
@@ -85,7 +100,8 @@ async function handleMessage(client, msg) {
     // Kirim notifikasi ke Kadep
     await notifyKadep(ticketNumber, requestData.goodsName, requestData.quantity, 
                      requestData.reason, requestData.link, senderNumber, requestData.senderName);
-
+    await notifyBendahara(ticketNumber, requestData.goodsName, requestData.quantity, 
+                     requestData.reason, requestData.link, senderNumber, requestData.senderName);
     // Beri tahu pengguna
     await msg.reply(
       `✅ Permintaan Anda telah diterima!\n\n*Nomor Tiket: ${ticketNumber}*\n\nGunakan nomor tiket ini untuk memeriksa status permintaan Anda. Ketik *${COMMANDS.CHECK} ${ticketNumber}* atau cukup ketik *${ticketNumber}* untuk memeriksa status.`
@@ -116,6 +132,12 @@ async function handleMessage(client, msg) {
       
       // Notify Bendahara
       const ticketData = await sheetsOperations.getTicketData(ticketNumber);
+      await notifyRequesterApproved(
+        ticketNumber, 
+        `${ticketData.goodsName} (${ticketData.quantity})`, 
+        ticketData.senderNumber, 
+        reason
+      );
       await notifyBendaharaForProcessing(ticketNumber, ticketData);
       
     } else if (action === '2') {
@@ -148,7 +170,6 @@ async function handleMessage(client, msg) {
     return;
   }
 
-  // Handle status update dari Bendahara (format: "1 123" atau "2 123 Alasan" atau "3 123 Alasan")
   if (senderNumber === process.env.BENDAHARA_NUMBER && /^[123]\s\d+/.test(messageBody)) {
     const parts = messageBody.split(' ');
     const statusCode = parts[0]; // 1, 2, atau 3
@@ -166,6 +187,7 @@ async function handleMessage(client, msg) {
 
     // Update sheet
     const updates = {
+      status: 'PENDING_PROCESS',
       statusBendahara: status,
       reasonBendahara: reason,
       lastUpdated: new Date().toISOString()
@@ -174,8 +196,15 @@ async function handleMessage(client, msg) {
     await sheetsOperations.updateTicketStatus(ticketNumber, updates);
     await msg.reply(`✅ Status permintaan *${ticketNumber}* diupdate menjadi: *${status}*\nAlasan: ${reason}`);
     
-    // Jika status PROCESSED, beri tahu pemohon
     if (status === 'PROCESSED') {
+      const updates = {
+        status: 'PROCESSED',
+        statusBendahara: status,
+        reasonBendahara: reason,
+        lastUpdated: new Date().toISOString()
+      };
+      
+      await sheetsOperations.updateTicketStatus(ticketNumber, updates);
       const ticketData = await sheetsOperations.getTicketData(ticketNumber);
       await notifyRequesterProcessed(
         ticketNumber,
@@ -202,7 +231,6 @@ async function handleMessage(client, msg) {
     await sheetsOperations.updateTicketStatus(ticketNumber, updates);
     await msg.reply(`❌ Permintaan *${ticketNumber}* ditolak dengan alasan: ${reason}`);
     
-    // Notify requester
     const ticketData = await sheetsOperations.getTicketData(ticketNumber);
     await notifyRequesterRejected(
       ticketNumber, 
@@ -215,228 +243,24 @@ async function handleMessage(client, msg) {
     return;
   }
 
-  // Handle check command (/cek)
   if (messageBody.startsWith(COMMANDS.CHECK)) {
     await handleCheckCommand(client, msg, senderNumber, messageBody);
     return;
   }
 
-  // Handle help command (/help)
   if (messageBody.startsWith(COMMANDS.HELP)) {
     await handleHelpCommand(client, msg);
     return;
   }
 
-  // Handle ticket number check (123)
   if (/^\d+$/.test(messageBody)) {
     await handleTicketCheck(client, msg, messageBody);
     return;
   }
 }
 
-// Handle approval
-async function handleApproval(client, msg, senderNumber, messageBody) {
-  try {
-    const parts = messageBody.split(' ');
-    const actionCode = parts[0];
-    const ticketNumber = parts[1];
-    const reason = parts.slice(2).join(' ');
-
-    // Check if user is Kadep
-    const isKadep = senderNumber === process.env.KADEP_NUMBER;
-    
-    if (!isKadep) {
-      await msg.reply('❌ Anda tidak memiliki izin untuk menyetujui/menolak permintaan.');
-      return;
-    }
-
-    // Get ticket data
-    const ticketData = await sheetsOperations.getTicketData(ticketNumber);
-    if (!ticketData) {
-      await msg.reply(`❌ Tiket *${ticketNumber}* tidak ditemukan.`);
-      return;
-    }
-
-    let updates = {};
-    let replyMessage = '';
-    
-    if (actionCode === '1' && ticketData.status === 'PENDING_APPROVAL_1') {
-      // Approval
-      updates = {
-        status: 'PENDING_PROCESS',
-        approvalKadep: 'APPROVED',
-        lastUpdated: new Date().toISOString()
-      };
-      replyMessage = `✅ Anda telah menyetujui permintaan *${ticketNumber}*.\nPermintaan telah diteruskan ke Bendahara.`;
-      
-      await sheetsOperations.updateTicketStatus(ticketNumber, updates);
-      await notifyBendaharaForProcessing(ticketNumber, ticketData);
-      
-    } else if (actionCode === '2' && ticketData.status === 'PENDING_APPROVAL_1') {
-      // Rejection
-      if (!reason) {
-        userStates[senderNumber] = { step: 'waitingForRejectionReason', ticketNumber };
-        await msg.reply(`Silakan berikan alasan penolakan untuk tiket *${ticketNumber}*:`);
-        return;
-      }
-      
-      updates = {
-        status: 'REJECTED',
-        approvalKadep: 'REJECTED',
-        reasonKadep: reason,
-        lastUpdated: new Date().toISOString()
-      };
-      replyMessage = `❌ Anda telah menolak permintaan *${ticketNumber}* dengan alasan: ${reason}`;
-      
-      await sheetsOperations.updateTicketStatus(ticketNumber, updates);
-      await notifyRequesterRejected(ticketNumber, ticketData, reason);
-      
-    } else {
-      replyMessage = `❌ Tidak dapat memproses tiket *${ticketNumber}* dengan status saat ini (*${ticketData.status}*).`;
-    }
-    
-    await msg.reply(replyMessage);
-    
-  } catch (error) {
-    console.error('Error handling approval:', error);
-    await msg.reply('Terjadi kesalahan. Gunakan format:\n*1 123* (setuju)\n*2 123 [alasan]* (tolak)');
-  }
-}
-
-// Handle rejection
-async function handleRejection(client, msg, senderNumber, ticketNumber, reason) {
-  try {
-    console.log(`Handling rejection for ticket ${ticketNumber} by ${senderNumber}`);
-    
-    // Check if user is kadep
-    const isKadep = senderNumber === process.env.KADEP_NUMBER;
-    
-    if (!isKadep) {
-      await msg.reply('❌ Anda tidak memiliki izin untuk menolak permintaan.');
-      return;
-    }
-    
-    // Get ticket data
-    const ticketData = await sheetsOperations.getTicketData(ticketNumber);
-    
-    if (!ticketData) {
-      await msg.reply(`❌ Tiket *${ticketNumber}* tidak ditemukan.`);
-      return;
-    }
-    
-    // Handle rejection
-    let updates = {};
-    let replyMessage = '';
-    
-    if (isKadep && ticketData.status === 'PENDING_APPROVAL_1') {
-      updates = {
-        status: 'REJECTED',
-        approvalKadep: 'REJECTED',
-        reasonKadep: reason,
-        lastUpdated: new Date().toISOString()
-      };
-      
-      replyMessage = `❌ Anda telah menolak permintaan *${ticketNumber}* dengan alasan: ${reason}`;
-      
-      // Update ticket status
-      await sheetsOperations.updateTicketStatus(ticketNumber, updates);
-      
-      // Notify requester that their request was rejected by Kadep
-      const requestDetails = ticketData.goodsName 
-        ? `${ticketData.goodsName} (${ticketData.quantity})`
-        : ticketData.request;
-        
-      await notifyRequesterRejected(ticketNumber, requestDetails, ticketData.senderNumber, reason);
-    } else {
-      // Status tidak sesuai
-      replyMessage = `❌ Tidak dapat menolak tiket *${ticketNumber}* dengan status saat ini (*${ticketData.status}*).`;
-    }
-    
-    // Kirim balasan
-    await msg.reply(replyMessage);
-    
-  } catch (error) {
-    console.error('Error handling rejection:', error);
-    await msg.reply('Terjadi kesalahan saat memproses penolakan. Silakan coba lagi nanti.');
-  }
-}
-
-// Handle Bendahara status update
-async function handleBendaharaStatusUpdate(client, msg, senderNumber, messageBody) {
-  try {
-    const parts = messageBody.split(' ');
-    const statusCode = parts[0];
-    const ticketNumber = parts[1];
-    const reason = parts.slice(2).join(' ') || ''; // Default empty string if no reason provided
-
-    // Check if user is Bendahara
-    const isBendahara = senderNumber === process.env.BENDAHARA_NUMBER;
-    
-    if (!isBendahara) {
-      await msg.reply('❌ Anda tidak memiliki izin untuk mengupdate status permintaan.');
-      return;
-    }
-
-    // Get ticket data
-    const ticketData = await sheetsOperations.getTicketData(ticketNumber);
-    
-    if (!ticketData) {
-      await msg.reply(`❌ Tiket *${ticketNumber}* tidak ditemukan.`);
-      return;
-    }
-
-    // Determine status based on code
-    let status = '';
-    let statusMessage = '';
-    
-    switch (statusCode) {
-      case '1':
-        status = 'NOT_PROCESSED';
-        statusMessage = 'Belum diproses';
-        break;
-      case '2':
-        status = 'IN_PROGRESS';
-        statusMessage = 'Sedang diproses';
-        break;
-      case '3':
-        status = 'PROCESSED';
-        statusMessage = 'Sudah diproses';
-        break;
-      default:
-        await msg.reply('❌ Kode status tidak valid. Gunakan format:\n*1 123* (belum diproses)\n*2 123 [alasan]* (sedang diproses)\n*3 123 [alasan]* (sudah diproses)');
-        return;
-    }
-
-    // Update ticket status - both statusBendahara and reasonBendahara
-    const updates = {
-      statusBendahara: status,
-      reasonBendahara: reason || statusMessage, // Use provided reason or default status message
-      lastUpdated: new Date().toISOString()
-    };
-    
-    await sheetsOperations.updateTicketStatus(ticketNumber, updates);
-    
-    // Send confirmation
-    await msg.reply(`✅ Status permintaan *${ticketNumber}* telah diupdate menjadi: *${statusMessage}*\nAlasan: ${updates.reasonBendahara}`);
-    
-    // Notify requester if status is PROCESSED
-    if (status === 'PROCESSED') {
-      const requestDetails = `${ticketData.goodsName} (${ticketData.quantity})`;
-      await notifyRequesterProcessed(ticketNumber, requestDetails, ticketData.senderNumber, updates.reasonBendahara);
-    }
-    
-  } catch (error) {
-    console.error('Error handling Bendahara status update:', error);
-    await msg.reply('Terjadi kesalahan. Gunakan format:\n*1 123* (belum diproses)\n*2 123 [alasan]* (sedang diproses)\n*3 123 [alasan]* (sudah diproses)');
-  }
-}
-  
-
-// Handle check command
 async function handleCheckCommand(client, msg, senderNumber, messageBody) {
   try {
-    // Parse the ticket number
-    // Format: /cek 123
     const parts = messageBody.split(' ');
     if (parts.length !== 2) {
       await msg.reply(
@@ -454,21 +278,16 @@ async function handleCheckCommand(client, msg, senderNumber, messageBody) {
   }
 }
 
-// Handle ticket check
 async function handleTicketCheck(client, msg, ticketNumber) {
   try {
-    // Check if ticket exists and get its status
     const ticketData = await sheetsOperations.getTicketData(ticketNumber);
     
     if (!ticketData) {
       await msg.reply(`❌ Tiket *${ticketNumber}* tidak ditemukan. Periksa kembali nomor tiket Anda.`);
       return;
     }
-    
-    // Format the status message based on the ticket's status
     let statusMessage = `📋 *Status Tiket: ${ticketNumber}*\n\n`;
     
-    // Tampilkan detail permintaan
     statusMessage += `Pemohon: ${ticketData.senderName}\n`;
     statusMessage += `Permintaan: ${ticketData.goodsName}\n`;
     statusMessage += `Jumlah: ${ticketData.quantity}\n`;
@@ -477,20 +296,22 @@ async function handleTicketCheck(client, msg, ticketNumber) {
     statusMessage += `Tanggal: ${new Date(ticketData.timestamp).toLocaleString('id-ID')}\n\n`;
     
     switch (ticketData.status) {
-      case 'PENDING_APPROVAL_1':
+      case 'PENDING_APPROVAL':
         statusMessage += '⏳ Status: Menunggu persetujuan Kepala Departemen';
         break;
       case 'REJECTED':
         statusMessage += `❌ Status: Ditolak oleh Kepala Departemen\nAlasan: ${ticketData.reasonKadep || 'Tidak ada alasan yang diberikan'}`;
         break;
       case 'PENDING_PROCESS':
-        statusMessage += '⏳ Status: Disetujui oleh Kepala Departemen, menunggu diproses Bendahara';
+        statusMessage += '⏳ Status: Disetujui oleh Kepala Departemen, menunggu diproses Bendahara.';
+        break;
+      case 'PROCESSED':
+        statusMessage += '⏳ Status: Selesai diproses oleh Bendahara';
         break;
       default:
         statusMessage += '❓ Status: Tidak diketahui';
     }
     
-    // Tambahkan status Bendahara jika ada
     if (ticketData.statusBendahara) {
       let bendaharaStatus = '';
       switch (ticketData.statusBendahara) {
@@ -517,7 +338,6 @@ async function handleTicketCheck(client, msg, ticketNumber) {
   }
 }
 
-// Handle help command
 // Handle help command
 async function handleHelpCommand(client, msg) {
   const helpMessage = 
@@ -556,7 +376,8 @@ async function notifyKadep(ticketNumber, goodsName, quantity, reason, link, requ
     `Permintaan: ${goodsName}\n` +
     `Jumlah: ${quantity}\n` +
     `Link: ${link}\n` +
-    `Alasan: ${reason}\n\n` +
+    `Alasan: ${reason}\n` +
+    `Link spreadsheet: https://docs.google.com/spreadsheets/d/1wh3MvjfAFeOGAp3UiMNjI5Ao3rHtuCHAS-ymd2M1dA4/edit?usp=sharing \n\n` +
     `Balas dengan:\n` +
     `*1 ${ticketNumber}* untuk menyetujui\n` +
     `*2 ${ticketNumber} [alasan]* untuk menolak\n\n` +
@@ -568,6 +389,29 @@ async function notifyKadep(ticketNumber, goodsName, quantity, reason, link, requ
   userStates[kadepNumber] = { ticketNumber };
 }
 
+async function notifyBendahara(ticketNumber, goodsName, quantity, reason, link, requesterNumber, requesterName) {
+  const bendaharaNumber = process.env.BENDAHARA_NUMBER;
+  if (!bendaharaNumber) {
+    console.error('Nomor Bendahara tidak dikonfigurasi di .env');
+    return;
+  }
+
+  const notificationMessage = 
+    `🔔 *NOTIFIKASI PERMINTAAN BARU*\n\n` +
+    `Nomor Tiket: *${ticketNumber}*\n` +
+    `Dari: ${requesterName} (${requesterNumber})\n` +
+    `Permintaan: ${goodsName}\n` +
+    `Jumlah: ${quantity}\n` +
+    `Link: ${link}\n` +
+    `Alasan: ${reason}\n\n` +
+    `Permintaan ini memerlukan persetujuan Kepala Departemen terlebih dahulu.\n\n` +
+    `Link spreadsheet: https://docs.google.com/spreadsheets/d/1wh3MvjfAFeOGAp3UiMNjI5Ao3rHtuCHAS-ymd2M1dA4/edit?usp=sharing`;
+
+  // Use the bot module to send message
+  const botModule = require('./bot');
+  await botModule.sendMessage(bendaharaNumber, notificationMessage);
+}
+
 // Updated notification function for Bendahara
 async function notifyBendaharaForProcessing(ticketNumber, ticketData) {
   const bendaharaNumber = process.env.BENDAHARA_NUMBER;
@@ -576,7 +420,7 @@ async function notifyBendaharaForProcessing(ticketNumber, ticketData) {
   const notificationMessage = 
     `🔔 *PERMINTAAN UNTUK DIPROSES*\n\n` +
     `Nomor Tiket: *${ticketNumber}*\n` +
-    `Dari: ${ticketData.senderName} (${ticketData.senderNumber})\n `+
+    `Dari: ${ticketData.senderName} (${ticketData.senderNumber})\n` +
     `Permintaan: ${ticketData.goodsName}\n` +
     `Jumlah: ${ticketData.quantity}\n` +
     `Link: ${ticketData.link || '-'}\n` +
