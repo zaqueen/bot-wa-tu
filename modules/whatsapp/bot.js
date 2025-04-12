@@ -1,12 +1,27 @@
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
+const chromium = require('@sparticuz/chromium'); 
 const handlers = require('./handlers');
 
 // Initialize WhatsApp client
 const client = new Client({
-  authStrategy: new LocalAuth(),
+  authStrategy: new LocalAuth({
+    dataPath: './whatsapp-sessions' // Simpan session secara persisten
+  }),
   puppeteer: {
-    args: ['--no-sandbox']
+    args: [
+      ...chromium.args,
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-accelerated-2d-canvas',
+      '--no-first-run',
+      '--no-zygote',
+      '--single-process'
+    ],
+    executablePath: process.env.CHROMIUM_PATH || await chromium.executablePath(), // Gunakan Chromium khusus
+    headless: true,
+    ignoreHTTPSErrors: true
   }
 });
 
